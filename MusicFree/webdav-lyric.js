@@ -1,218 +1,199 @@
 "use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
 
-const { createClient, AuthType } = require("webdav");
+const webdav_1 = require("webdav");
 
 /**
- * 用户变量缓存
+ * 说明
+ * - 这是“歌词插件”（supportedSearchType: ['lyric']），不是音源插件
+ * - 你的规则：lrc 文件名与音乐文件名完全一致（仅扩展名不同）
+ * - 实现思路：
+ *   1) 登录/取 client：完全模仿你提供的 webdav插件.js（同样读 env.getUserVariables）
+ *   2) search(query)：在指定 searchPath 目录下列出 .lrc 文件并按文件名过滤（模仿你贴的歌词插件 search 结构）
+ *   3) getLyric(musicItem)：用 musicItem.title 去匹配 `${title}.lrc`（完全一致匹配），找到了就读文件内容返回 rawLrc
  */
-let cached = {};
 
-function getVars() {
-  const vars =
-    (env && env.getUserVariables && env.getUserVariables.call(env)) || {};
-  return vars || {};
-}
-
-function normalizePath(p) {
-  if (!p) return "/";
-  if (!p.startsWith("/")) p = "/" + p;
-  // 去掉末尾多余 /
-  if (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);
-  return p;
-}
-
-function splitPaths(pathsStr) {
-  if (!pathsStr) return ["/"];
-  const arr = String(pathsStr)
-    .split(",")
-    .map((s) => normalizePath(s.trim()))
-    .filter(Boolean);
-  return arr.length ? arr : ["/"];
-}
+let cachedData = {};
 
 function getClient() {
-  const { url, username, password, lrcSearchPath } = getVars();
-  if (!(url && username && password)) return null;
+  var _a, _b, _c;
+  const { url, username, password, searchPath } =
+    (_b =
+      (_a = env === null || env === void 0 ? void 0 : env.getUserVariables) ===
+        null || _a === void 0
+        ? void 0
+        : _a.call(env)) !== null && _b !== void 0
+      ? _b
+      : {};
 
-  // 变量变化时清缓存
-  const key = `${url}@@${username}@@${password}@@${lrcSearchPath || ""}`;
-  if (cached.key !== key) {
-    cached.key = key;
-    cached.url = url;
-    cached.username = username;
-    cached.password = password;
-    cached.lrcSearchPathList = splitPaths(lrcSearchPath);
-    cached.dirCache = {}; // path -> contents
+  if (!(url && username && password)) {
+    return null;
   }
 
-  return createClient(url, {
-    authType: AuthType.Password,
+  // 模仿 webdav插件.js：变量变化则清缓存
+  if (
+    !(
+      cachedData.url === url &&
+      cachedData.username === username &&
+      cachedData.password === password &&
+      cachedData.searchPath === searchPath
+    )
+  ) {
+    cachedData.url = url;
+    cachedData.username = username;
+    cachedData.password = password;
+    cachedData.searchPath = searchPath;
+    cachedData.searchPathList =
+      (_c = searchPath === null || searchPath === void 0 ? void 0 : searchPath.split) ===
+        null || _c === void 0
+        ? void 0
+        : _c.call(searchPath, ",");
+    cachedData.cacheFileList = null; // 缓存 lrc 文件列表
+  }
+
+  return (0, webdav_1.createClient)(url, {
+    authType: webdav_1.AuthType.Password,
     username,
     password,
   });
 }
 
-function isLrcFile(item) {
-  // webdav getDirectoryContents 返回项通常有 basename/filename/type
-  if (!item || item.type !== "file") return false;
-  const name = (item.basename || item.filename || "").toLowerCase();
-  return name.endsWith(".lrc");
-}
-
-function normalizeName(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/\.(lrc)$/i, "")
-    .replace(/[\s\-\_\.\(\)\[\]【】（）「」'"]/g, "")
-    .trim();
-}
-
-async function listLrcFilesInPath(client, p) {
-  if (cached.dirCache[p]) return cached.dirCache[p];
-
-  try {
-    const items = await client.getDirectoryContents(p);
-    const files = (items || []).filter(isLrcFile);
-    cached.dirCache[p] = files;
-    return files;
-  } catch {
-    cached.dirCache[p] = [];
-    return [];
+function getSearchPathList() {
+  const list = cachedData.searchPathList;
+  if (list && list.length) {
+    // trim 一下，避免用户写 "/lrc, /lyrics"
+    return list.map((s) => String(s || "").trim()).filter((s) => s !== "");
   }
+  return ["/"];
 }
 
-async function findBestLrcFile(client, title, artist) {
-  const { matchMode } = getVars(); // "exact" | "includes" | "smart"
-  const mode = matchMode || "smart";
+function isLrcFile(it) {
+  if (!it || it.type !== "file") return false;
+  const base = String(it.basename || "");
+  return base.toLowerCase().endsWith(".lrc");
+}
 
-  const t = normalizeName(title);
-  const ta = normalizeName(`${title}${artist ? artist : ""}`);
-  const a = normalizeName(artist);
+/**
+ * 读取/缓存所有 lrc 文件（只读一层目录，不递归；和你 webdav 音乐插件一致）
+ */
+async function ensureLrcFileList() {
+  const client = getClient();
+  if (!client) return [];
 
-  let all = [];
-  for (const p of cached.lrcSearchPathList || ["/"]) {
-    const files = await listLrcFilesInPath(client, p);
-    all = all.concat(files);
+  if (cachedData.cacheFileList) {
+    return cachedData.cacheFileList;
   }
 
-  if (!all.length) return null;
+  let result = [];
+  const searchPathList = getSearchPathList();
 
-  // 预计算候选名
-  const scored = all.map((f) => {
-    const base = f.basename || f.filename || "";
-    const n = normalizeName(base);
+  for (let search of searchPathList) {
+    try {
+      const fileItems = await client.getDirectoryContents(search);
+      const lrcItems = (fileItems || []).filter(isLrcFile);
+      result = result.concat(lrcItems);
+    } catch (_e) {}
+  }
 
-    let score = 0;
-    if (mode === "exact") {
-      score = n === t || n === ta ? 100 : 0;
-    } else if (mode === "includes") {
-      if (n.includes(t) && t) score += 80;
-      if (a && n.includes(a)) score += 10;
-    } else {
-      // smart：优先同名，其次包含，再次 title+artist
-      if ((t && n === t) || (ta && n === ta)) score += 100;
-      if (t && n.includes(t)) score += 60;
-      if (a && n.includes(a)) score += 10;
-      // 文件名更短更像“同名”
-      score -= Math.min(n.length, 200) / 50;
-    }
-
-    return { file: f, score };
-  });
-
-  scored.sort((x, y) => y.score - x.score);
-
-  // 分数太低就认为找不到
-  if (!scored[0] || scored[0].score < 30) return null;
-  return scored[0].file;
+  cachedData.cacheFileList = result;
+  return result;
 }
 
+/**
+ * 歌词搜索：在 webdav 的 lrc 列表中按文件名包含 query 过滤
+ * 返回结构模仿你给的“歌词插件”
+ */
 async function search(query, page, type) {
-  if (type !== "lyric") return;
+  if (type !== "lyric") {
+    return;
+  }
 
   const client = getClient();
   if (!client) {
     return { isEnd: true, data: [] };
   }
 
-  // 简化：不做分页（因为 WebDAV 目录一般不太大；也可以后续加 page）
-  const q = normalizeName(query);
+  const list = await ensureLrcFileList();
 
-  let all = [];
-  for (const p of cached.lrcSearchPathList || ["/"]) {
-    const files = await listLrcFilesInPath(client, p);
-    all = all.concat(files);
-  }
-
-  const data = all
-    .filter((f) => normalizeName(f.basename || f.filename || "").includes(q))
-    .slice(0, 50)
-    .map((f) => ({
-      title: f.basename || f.filename,
-      id: f.filename, // 直接用 webdav 的 filename 路径做 id
+  const q = String(query || "");
+  const data = (list || [])
+    .filter((it) => String(it.basename || "").includes(q))
+    .map((it) => ({
+      title: it.basename, // 展示用
+      id: it.filename, // 用 filename 作为唯一 id（后续 getLyric 可直接读）
       artist: "WebDAV",
-      album: "Lyrics",
+      album: "LRC",
     }));
 
-  return { isEnd: true, data };
+  return {
+    isEnd: true,
+    data,
+  };
 }
 
+/**
+ * 自动取歌词：
+ * - 你的规则：lrc 文件名与音乐文件名完全一致
+ * - 由于 MusicFree 的 musicItem.title 通常不包含扩展名，所以直接找 `${title}.lrc`
+ * - 如果你本地实际是 “xxx.flac” 对应 “xxx.flac.lrc”，那就需要你告诉我，我再改匹配规则
+ */
 async function getLyric(musicItem) {
   const client = getClient();
-  if (!client || !musicItem) return null;
+  if (!client || !musicItem) {
+    return null;
+  }
 
-  // 1) 如果是 search() 点进来的结果：musicItem.id 就是 lrc 路径
-  // （兼容“手动搜索选择歌词文件”的用法）
+  // 1) 如果是从 search 结果点进来的：musicItem.id 就是 lrc 路径
   if (musicItem.id && String(musicItem.id).toLowerCase().endsWith(".lrc")) {
     try {
       const raw = await client.getFileContents(musicItem.id, {
         format: "text",
       });
       return raw ? { rawLrc: String(raw) } : null;
-    } catch {
+    } catch (_e) {
       return null;
     }
   }
 
-  // 2) 自动匹配：按 title/artist 在 WebDAV 歌词库里找同名
-  const title = musicItem.title || "";
-  const artist = musicItem.artist || "";
-
+  // 2) 自动匹配：用 title 精确匹配同名 .lrc
+  const title = String(musicItem.title || "").trim();
   if (!title) return null;
 
-  const file = await findBestLrcFile(client, title, artist);
-  if (!file || !file.filename) return null;
+  const targetBaseName = `${title}.lrc`;
+
+  const list = await ensureLrcFileList();
+  const hit = (list || []).find(
+    (it) => String(it.basename || "").toLowerCase() === targetBaseName.toLowerCase()
+  );
+
+  if (!hit || !hit.filename) {
+    return null;
+  }
 
   try {
-    const raw = await client.getFileContents(file.filename, { format: "text" });
+    const raw = await client.getFileContents(hit.filename, { format: "text" });
     return raw ? { rawLrc: String(raw) } : null;
-  } catch {
+  } catch (_e) {
     return null;
   }
 }
 
 module.exports = {
-  platform: "WebDAV歌词库",
+  platform: "WebDAV歌词",
+  author: "你自己",
+  description: "�� WebDAV 中搜索/读取与歌曲文件名完全一致的 .lrc 歌词",
   version: "0.0.1",
-  author: "Cyan",
-  description: "在 WebDAV 指定目录中搜索/自动匹配同名 .lrc 文件",
-  cacheControl: "no-cache",
   supportedSearchType: ["lyric"],
+  cacheControl: "no-cache",
+
+  // 用户变量：这里完全模仿 webdav插件.js 的字段名（url/username/password/searchPath）
   userVariables: [
     { key: "url", name: "WebDAV地址" },
     { key: "username", name: "用户名" },
     { key: "password", name: "密码", type: "password" },
-    {
-      key: "lrcSearchPath",
-      name: "歌词目录（可多个，逗号分隔）",
-      hint: "例如：/Lyrics,/Music/LRC",
-    },
-    {
-      key: "matchMode",
-      name: "匹配模式：smart / exact / includes",
-      hint: "默认 smart",
-    },
+    { key: "searchPath", name: "存放歌词的路径（可多个逗号分隔）" },
   ],
+
   search,
   getLyric,
 };
