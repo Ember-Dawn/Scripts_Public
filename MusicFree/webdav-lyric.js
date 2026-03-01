@@ -42,8 +42,10 @@ function getClient() {
     cachedData.password = password;
     cachedData.searchPath = searchPath;
     cachedData.searchPathList =
-      (_c = searchPath === null || searchPath === void 0 ? void 0 : searchPath.split) ===
-        null || _c === void 0
+      (_c =
+        searchPath === null || searchPath === void 0
+          ? void 0
+          : searchPath.split) === null || _c === void 0
         ? void 0
         : _c.call(searchPath, ",");
     cachedData.cacheFileList = null;
@@ -59,7 +61,9 @@ function getClient() {
 function getSearchPathList() {
   const list = cachedData.searchPathList;
   if (list && list.length) {
-    return list.map((s) => String(s || "").trim()).filter((s) => s !== "");
+    return list
+      .map((s) => String(s || "").trim())
+      .filter((s) => s !== "");
   }
   return ["/"];
 }
@@ -105,7 +109,7 @@ async function search(query, page, type) {
 
   const list = await ensureLrcFileList();
 
-  // 关键改动：把 musicName.mp3 -> musicName
+  // 把 musicName.mp3 -> musicName
   const qNoExt = stripExt(query);
 
   const data = (list || [])
@@ -129,6 +133,7 @@ async function getLyric(musicItem) {
     return null;
   }
 
+  // 1) 如果是从 search 结果点进来的：musicItem.id 就是 lrc 路径
   if (musicItem.id && String(musicItem.id).toLowerCase().endsWith(".lrc")) {
     try {
       const raw = await client.getFileContents(musicItem.id, {
@@ -140,8 +145,7 @@ async function getLyric(musicItem) {
     }
   }
 
-  // 自动匹配：用 title 精确匹配同名 .lrc
-  // 同时也做一次“去扩展名”，避免 title 恰好带了 .mp3/.flac
+  // 2) 自动匹配：用 title 精确匹配同名 .lrc
   const title = stripExt(musicItem.title || "");
   if (!title) return null;
 
@@ -150,7 +154,8 @@ async function getLyric(musicItem) {
   const list = await ensureLrcFileList();
   const hit = (list || []).find(
     (it) =>
-      String(it.basename || "").toLowerCase() === targetBaseName.toLowerCase()
+      String(it.basename || "").toLowerCase() ===
+      targetBaseName.toLowerCase()
   );
 
   if (!hit || !hit.filename) {
@@ -167,9 +172,15 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: "WebDAV歌词",
-  author: "你自己",
+  author: "Cyan",
   description: "从 WebDAV 中搜索/读取与歌曲文件名完全一致的 .lrc 歌词",
-  version: "0.0.2",
+  version: "0.1.0",
+
+  // “更新插件”依赖 srcUrl；“分享插件”通常也会用到 srcUrl（让别人一键安装同源插件）
+  // 这里先留空字符串，你填上你实际托管的直链 .js 地址即可（例如 gitee raw / github raw）。
+  // 如果你不填，更新按钮一般会不可用或无法更新。
+  srcUrl: "",
+
   supportedSearchType: ["lyric"],
   cacheControl: "no-cache",
   userVariables: [
